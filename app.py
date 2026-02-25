@@ -9,8 +9,23 @@ import streamlit as st
 import anthropic
 import json
 import os
+import re
+import sys
 import time
 from datetime import datetime
+
+# ── RFP SYSTEM ─────────────────────────────────────────────────
+# Option 2: pre-built templates  |  Option 3: Claude AI fallback
+_rfp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rfp_system")
+if os.path.exists(_rfp_dir):
+    sys.path.insert(0, _rfp_dir)
+    try:
+        from rfp_engine import generate_rfp, template_exists
+        RFP_AVAILABLE = True
+    except ImportError:
+        RFP_AVAILABLE = False
+else:
+    RFP_AVAILABLE = False
 
 # ── PAGE CONFIG ────────────────────────────────────────────────
 st.set_page_config(
@@ -874,7 +889,85 @@ elif st.session_state.step == 6:
             st.session_state.step = 5
             st.rerun()
 
-    # Activity log
+    # ── RFP GENERATION ───────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<div class="section-label">Generate RFP for Shortlisted Vendors</div>',
+                unsafe_allow_html=True)
+
+    if not RFP_AVAILABLE:
+        st.info("ℹ️ RFP generation is not available — make sure the `rfp_system/` folder is in the same directory as `app.py`.")
+    else:
+        has_template = template_exists(cat)
+
+        if has_template:
+            st.markdown(f"""
+            <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-radius:8px;
+                        padding:0.8rem 1.2rem; font-size:0.88rem; color:#166534; margin-bottom:1rem;">
+                ✅ <strong>Pre-built template found</strong> for <em>{cat}</em> —
+                RFP will use curated, category-specific questions.
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="background:#fffbeb; border:1px solid #fde68a; border-radius:8px;
+                        padding:0.8rem 1.2rem; font-size:0.88rem; color:#92400e; margin-bottom:1rem;">
+                ⚡ <strong>No template found</strong> for <em>{cat}</em> —
+                Claude AI will generate category-specific RFP questions on the fly.
+            </div>""", unsafe_allow_html=True)
+
+        col_r1, col_r2 = st.columns([2, 1])
+        with col_r1:
+            rfp_org = st.text_input(
+                "Organisation name for RFP header",
+                value=st.session_state.org_name,
+                key="rfp_org_name"
+            )
+        with col_r2:
+            rfp_deadline = st.selectbox(
+                "Vendor response deadline",
+                ["1-2 weeks", "2-4 weeks", "4-6 weeks"],
+                index=1,
+                key="rfp_deadline"
+            )
+
+        if st.button("📄 Generate RFP Word Document", use_container_width=True):
+            top_vendor_names = [v["name"] for v in (st.session_state.final_report or [])[:7]]
+            spinner_msg = (
+                f"Loading template for {cat}..."
+                if has_template
+                else f"Asking Claude to generate RFP questions for {cat}..."
+            )
+            with st.spinner(spinner_msg):
+                try:
+                    rfp_path = generate_rfp(
+                        category       = cat,
+                        org_name       = rfp_org or org,
+                        top_vendors    = top_vendor_names,
+                        criteria       = st.session_state.criteria,
+                        restrictions   = st.session_state.restrictions,
+                        output_dir     = "/tmp/rfp_outputs/",
+                        deadline_weeks = rfp_deadline
+                    )
+                    with open(rfp_path, "rb") as f:
+                        rfp_bytes = f.read()
+
+                    safe_cat = re.sub(r'[^a-zA-Z0-9]', '_', cat)
+                    rfp_filename = f"RFP_{safe_cat}.docx"
+                    source_label = "from template" if has_template else "by Claude AI"
+
+                    st.success(f"✅ RFP generated {source_label} — ready to download")
+                    st.download_button(
+                        label     = f"⬇ Download RFP — {cat}",
+                        data      = rfp_bytes,
+                        file_name = rfp_filename,
+                        mime      = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key       = "download_rfp_docx"
+                    )
+                    log(f"RFP generated {source_label} for {cat}")
+                except Exception as e:
+                    st.error(f"RFP generation failed: {str(e)}")
+                    st.info("Check that your ANTHROPIC_API_KEY is set in Streamlit Secrets and `rfp_system/` is present.")
+
+    # ── Activity log ─────────────────────────────────────────────
     if st.session_state.log:
         with st.expander("📋 Activity Log"):
             log_html = "<br>".join(st.session_state.log)
